@@ -1,6 +1,6 @@
 name: Build Preview Deployment
 
-n:
+on:
   pull_request:
     types: [opened, synchronize]
 
