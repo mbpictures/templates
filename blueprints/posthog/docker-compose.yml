@@ -183,8 +183,8 @@ services:
     image: caddy:2.6.1
     restart: unless-stopped
     ports:
-      - '80:80'
-      - '443:443'
+      - 80
+      - 443
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy-data:/data
@@ -202,8 +202,8 @@ services:
       MINIO_ROOT_USER: object_storage_root_user
       MINIO_ROOT_PASSWORD: object_storage_root_password
     ports:
-      - '19000:19000'
-      - '19001:19001'
+      - 19000
+      - 19001
 
   asyncmigrationscheck:
     command: python manage.py run_async_migrations --check
@@ -231,7 +231,7 @@ services:
       - ES_SEEDS=elasticsearch
       - ES_VERSION=v7
     ports:
-      - 7233:7233
+      - 7233
     labels:
       kompose.volume.type: configMap
     volumes:
@@ -342,7 +342,7 @@ services:
     environment:
       - LIVESTREAM_JWT_SECRET=${POSTHOG_SECRET}
     ports:
-      - '8666:8080'
+      - 8666:8080
     volumes:
       - ./posthog/docker/livestream/configs-hobby.yml:/configs/configs.yml
 
