@@ -2716,5 +2716,20 @@
       "self-hosted",
       "aggregator"
     ]
+  },
+  {
+    "id": "posthog",
+    "name": "Posthog",
+    "version": "9.5.20",
+    "description": "PostHog provides open-source web & product analytics, session recording, feature flagging and A/B testing.",
+    "logo": "logo.svg",
+    "links": {
+      "github": "https://github.com/PostHog/posthog",
+      "website": "https://posthog.com",
+      "docs": "https://posthog.com/docs"
+    },
+    "tags": [
+      "analytics"
+    ]
   }
 ]

@@ -1,0 +1,381 @@
+
+x-common-env: &common_env
+  OTEL_SDK_DISABLED: 'true'
+  DISABLE_SECURE_SSL_REDIRECT: 'true'
+  IS_BEHIND_PROXY: 'true'
+  DATABASE_URL: 'postgres://posthog:${DB_PASSWORD}@db:5432/posthog'
+  CLICKHOUSE_HOST: 'clickhouse'
+  CLICKHOUSE_DATABASE: 'posthog'
+  CLICKHOUSE_SECURE: 'false'
+  CLICKHOUSE_VERIFY: 'false'
+  CLICKHOUSE_API_USER: 'api'
+  CLICKHOUSE_API_PASSWORD: 'apipass'
+  CLICKHOUSE_APP_USER: 'app'
+  CLICKHOUSE_APP_PASSWORD: 'apppass'
+  API_QUERIES_PER_TEAM: '{"1": 100}'
+  KAFKA_HOSTS: 'kafka'
+  REDIS_URL: 'redis://redis:6379/'
+  PGHOST: db
+  PGUSER: posthog
+  PGPASSWORD: ${DB_PASSWORD}
+  DEPLOYMENT: hobby
+  CDP_API_URL: 'http://plugins:6738'
+  SITE_URL: ${SITE_URL}
+  SECRET_KEY: ${POSTHOG_SECRET}
+
+services:
+  db:
+    image: postgres:12-alpine
+    restart: on-failure
+    environment:
+      POSTGRES_USER: posthog
+      POSTGRES_DB: posthog
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-posthog}
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U posthog']
+      interval: 5s
+      timeout: 5s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:6.2.7-alpine
+    restart: on-failure
+    command: redis-server --maxmemory-policy allkeys-lru --maxmemory 200mb
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - redis-data:/data
+
+  redis7:
+    image: redis:7.2-alpine
+    restart: on-failure
+    command: redis-server --maxmemory-policy allkeys-lru --maxmemory 200mb
+    healthcheck:
+      test: [ 'CMD', 'redis-cli', 'ping' ]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - redis7-data:/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    restart: on-failure
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: 1
+    depends_on:
+      - kafka
+      - zookeeper
+    volumes:
+      #- posthog/idl:/idl
+      - ../files/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      - ../files/clickhouse/config.xml:/etc/clickhouse-server/config.xml
+      - ../files/clickhouse/config.d/default.xml:/etc/clickhouse-server/config.d/default.xml
+      #- clickhouse/users.xml:/etc/clickhouse-server/users.xml
+      #- clickhouse/user_defined_function.xml:/etc/clickhouse-server/user_defined_function.xml
+      #- user_scripts:/var/lib/clickhouse/user_scripts
+      - clickhouse-data:/var/lib/clickhouse
+
+  zookeeper:
+    image: zookeeper:3.7.0
+    restart: on-failure
+    volumes:
+      - zookeeper-datalog:/datalog
+      - zookeeper-data:/data
+      - zookeeper-logs:/logs
+
+  kafka:
+    image: ghcr.io/posthog/kafka-container:v2.8.2
+    restart: on-failure
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: kafka-cluster.sh cluster-id --bootstrap-server localhost:9092 || exit 1
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    environment:
+      KAFKA_LOG_RETENTION_MS: 3600000
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+      KAFKA_LOG_RETENTION_HOURS: 1
+      KAFKA_BROKER_ID: 1001
+      KAFKA_CFG_RESERVED_BROKER_MAX_ID: 1001
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      ALLOW_PLAINTEXT_LISTENER: 'true'
+    volumes:
+      - kafka-data:/bitnami/kafka
+
+  worker:
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    command: ./bin/docker-worker-celery --with-scheduler
+    restart: on-failure
+    environment:
+      <<: *common_env
+      SITE_URL: https://$DOMAIN
+      SECRET_KEY: $POSTHOG_SECRET
+      OBJECT_STORAGE_ACCESS_KEY_ID: 'object_storage_root_user'
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: 'object_storage_root_password'
+      OBJECT_STORAGE_ENDPOINT: http://objectstorage:19000
+      SESSION_RECORDING_V2_S3_ENDPOINT: http://objectstorage:19000
+      OBJECT_STORAGE_ENABLED: true
+      ENCRYPTION_SALT_KEYS: ${ENCRYPTION_SALT_KEYS}
+
+  web:
+    restart: on-failure
+    command: /compose/start
+    volumes:
+      - ./compose:/compose
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    environment:
+      SITE_URL: ${SITE_URL}
+      LIVESTREAM_HOST: '${SITE_URL}:8666'
+      SECRET_KEY: ${POSTHOG_SECRET}
+      OBJECT_STORAGE_ACCESS_KEY_ID: 'object_storage_root_user'
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: 'object_storage_root_password'
+      OBJECT_STORAGE_ENDPOINT: http://objectstorage:19000
+      SESSION_RECORDING_V2_S3_ENDPOINT: http://objectstorage:19000
+      OBJECT_STORAGE_ENABLED: true
+      ENCRYPTION_SALT_KEYS: ${ENCRYPTION_SALT_KEYS}
+      OTEL_SERVICE_NAME: 'posthog'
+      OTEL_EXPORTER_OTLP_ENDPOINT: ''
+      <<: *common_env
+    depends_on:
+      - db
+      - redis
+      - clickhouse
+      - kafka
+      - objectstorage
+
+  plugins:
+    command: ./bin/plugin-server --no-restart-loop
+    restart: on-failure
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    environment:
+      SITE_URL: ${SITE_URL}
+      SECRET_KEY: ${POSTHOG_SECRET}
+      OBJECT_STORAGE_ACCESS_KEY_ID: 'object_storage_root_user'
+      OBJECT_STORAGE_SECRET_ACCESS_KEY: 'object_storage_root_password'
+      OBJECT_STORAGE_ENDPOINT: http://objectstorage:19000
+      SESSION_RECORDING_V2_S3_ENDPOINT: http://objectstorage:19000
+      OBJECT_STORAGE_ENABLED: true
+      CDP_REDIS_HOST: redis7
+      CDP_REDIS_PORT: 6379
+      ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
+      CYCLOTRON_DATABASE_URL: 'postgres://posthog:${DB_PASSWORD}@db:5432/posthog'
+      DATABASE_URL: 'postgres://posthog:${DB_PASSWORD}@db:5432/posthog'
+      PERSONS_DATABASE_URL: 'postgres://posthog:${DB_PASSWORD}@db:5432/posthog'
+      <<: *common_env
+    depends_on:
+      - db
+      - redis
+      - redis7
+      - clickhouse
+      - kafka
+      - objectstorage
+
+  caddy:
+    image: caddy:2.6.1
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+  objectstorage:
+    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    restart: on-failure
+    volumes:
+      - objectstorage:/data
+    entrypoint: sh
+    command: -c 'mkdir -p /data/posthog && minio server --address ":19000" --console-address ":19001" /data'
+    environment:
+      MINIO_ROOT_USER: object_storage_root_user
+      MINIO_ROOT_PASSWORD: object_storage_root_password
+    ports:
+      - '19000:19000'
+      - '19001:19001'
+
+  asyncmigrationscheck:
+    command: python manage.py run_async_migrations --check
+    restart: 'no'
+    deploy:
+      replicas: 0
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    environment:
+      <<: *common_env
+      SKIP_ASYNC_MIGRATIONS_SETUP: 0
+
+  # Temporal containers
+  temporal:
+    restart: on-failure
+    image: temporalio/auto-setup:1.20.0
+    environment:
+      - ENABLE_ES=false
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=posthog
+      - POSTGRES_PWD=${DB_PASSWORD:-posthog}
+      - POSTGRES_SEEDS=db
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=true
+      - ES_SEEDS=elasticsearch
+      - ES_VERSION=v7
+    ports:
+      - 7233:7233
+    labels:
+      kompose.volume.type: configMap
+    volumes:
+      - ./posthog/docker/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
+    depends_on:
+      db:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+  elasticsearch:
+    environment:
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+      - xpack.security.enabled=false
+    image: elasticsearch:7.16.2
+    expose:
+      - 9200
+    volumes:
+      - /var/lib/elasticsearch/data
+  temporal-admin-tools:
+    environment:
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    image: temporalio/admin-tools:1.20.0
+    stdin_open: true
+    tty: true
+    depends_on:
+      - temporal
+  temporal-ui:
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+      - TEMPORAL_CSRF_COOKIE_INSECURE=true
+    image: temporalio/ui:2.31.2
+    ports:
+      - 8081:8080
+  temporal-django-worker:
+    command: /compose/temporal-django-worker
+    restart: on-failure
+    volumes:
+      - ./compose:/compose
+    image: posthog/posthog:${POSTHOG_APP_TAG}
+    environment:
+      TEMPORAL_HOST: temporal
+      <<: *common_env
+    depends_on:
+      - db
+      - redis
+      - clickhouse
+      - kafka
+      - objectstorage
+      - temporal
+
+  cyclotron-janitor:
+    image: ghcr.io/posthog/posthog/cyclotron-janitor:master
+    restart: on-failure
+    environment:
+      DATABASE_URL: 'postgres://posthog:${DB_PASSWORD}@db:5432/posthog'
+      KAFKA_HOSTS: 'kafka:9092'
+      KAFKA_TOPIC: 'clickhouse_app_metrics2'
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+
+  capture:
+    image: ghcr.io/posthog/posthog/capture:master
+    restart: on-failure
+    environment:
+      ADDRESS: '0.0.0.0:3000'
+      KAFKA_TOPIC: 'events_plugin_ingestion'
+      KAFKA_HOSTS: 'kafka:9092'
+      REDIS_URL: 'redis://redis:6379/'
+      CAPTURE_MODE: events
+      RUST_LOG: 'info,rdkafka=warn'
+
+  replay-capture:
+    image: ghcr.io/posthog/posthog/capture:master
+    restart: on-failure
+    environment:
+      ADDRESS: '0.0.0.0:3000'
+      KAFKA_TOPIC: 'session_recording_snapshot_item_events'
+      KAFKA_HOSTS: 'kafka:9092'
+      REDIS_URL: 'redis://redis:6379/'
+      CAPTURE_MODE: recordings
+
+
+  property-defs-rs:
+    image: ghcr.io/posthog/posthog/property-defs-rs:master
+    restart: on-failure
+    environment:
+      DATABASE_URL: 'postgres://posthog:${DB_PASSWORD}@db:5432/posthog'
+      KAFKA_HOSTS: 'kafka:9092'
+      SKIP_WRITES: 'false'
+      SKIP_READS: 'false'
+      FILTER_MODE: 'opt-out'
+
+  livestream:
+    image: 'ghcr.io/posthog/livestream:main'
+    restart: on-failure
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      - LIVESTREAM_JWT_SECRET=${POSTHOG_SECRET}
+    ports:
+      - '8666:8080'
+    volumes:
+      - ./posthog/docker/livestream/configs-hobby.yml:/configs/configs.yml
+
+  feature-flags:
+    image: ghcr.io/posthog/posthog/feature-flags:master
+    restart: on-failure
+    volumes:
+      - ./share:/share
+    environment:
+      WRITE_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+      READ_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+      MAXMIND_DB_PATH: '/share/GeoLite2-City.mmdb'
+      REDIS_URL: 'redis://redis:6379/'
+      # Optional: Use separate Redis URLs for read/write separation
+      # REDIS_READER_URL: 'redis://redis-replica:6379/'
+      # REDIS_WRITER_URL: 'redis://redis-primary:6379/'
+      # Optional: Increase Redis timeout (default is 100ms)
+      # REDIS_TIMEOUT_MS: 200
+      ADDRESS: '0.0.0.0:3001'
+      RUST_LOG: 'info'
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  zookeeper-data:
+  zookeeper-datalog:
+  zookeeper-logs:
+  objectstorage:
+  postgres-data:
+  clickhouse-data:
+  caddy-data:
+  caddy-config:
+  redis-data:
+  redis7-data:
+  kafka-data:
