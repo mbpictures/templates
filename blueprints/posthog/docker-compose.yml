@@ -186,7 +186,7 @@ services:
       - 80
       - 443
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ../files/caddy/Caddyfile:/etc/caddy/Caddyfile
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
